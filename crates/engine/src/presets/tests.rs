@@ -356,7 +356,7 @@ fn pattern_groups_select_apply_and_sync() {
     let v = s.execute("pattern.presets.list", json!({})).unwrap();
     let groups = v["groups"].as_array().unwrap();
     assert_eq!(groups[0]["name"], "Geometric");
-    assert_eq!(groups[0]["patterns"].as_array().unwrap().len(), 4);
+    assert_eq!(groups[0]["patterns"].as_array().unwrap().len(), 17);
     s.execute("pattern.presets.select", json!({"pattern": "Bricks"})).unwrap();
     // Pattern fill layers and Fill default to the selected pattern.
     let r = s.execute("pattern.presets.apply", json!({})).unwrap();
@@ -379,10 +379,24 @@ fn pattern_groups_select_apply_and_sync() {
     s.execute("pattern.presets.edit", json!({"action": "rename", "preset": "Mine", "name": "Ours"})).unwrap();
     s.execute("pattern.presets.edit", json!({"action": "delete", "preset": "Ours"})).unwrap();
     let v = s.execute("pattern.presets.list", json!({})).unwrap();
-    assert_eq!(v["groups"][0]["patterns"].as_array().unwrap().len(), 4);
+    assert_eq!(v["groups"][0]["patterns"].as_array().unwrap().len(), 17);
     // Deleting a group deletes its patterns from the library.
     s.execute("pattern.presets.edit", json!({"action": "deleteGroup", "group": "Textures"})).unwrap();
     assert!(crate::pattern_cmds::resolve(&s, "Weave").is_none());
+}
+
+#[test]
+fn pattern_reset_restores_builtin_groups() {
+    let mut s = session(8);
+    s.execute("pattern.presets.edit", json!({"action": "move", "preset": "Bokeh", "to": "Custom"})).unwrap();
+    let moved = s.execute("pattern.presets.list", json!({})).unwrap();
+    let custom = moved["groups"].as_array().unwrap().iter().find(|g| g["name"] == "Custom").unwrap();
+    assert!(custom["patterns"].as_array().unwrap().iter().any(|p| p["name"] == "Bokeh"));
+    s.execute("pattern.presets.reset", json!({})).unwrap();
+    let v = s.execute("pattern.presets.list", json!({})).unwrap();
+    assert!(!v["groups"].as_array().unwrap().iter().any(|g| g["name"] == "Custom"), "the custom group is gone");
+    let effects = v["groups"].as_array().unwrap().iter().find(|g| g["name"] == "Effects").unwrap();
+    assert!(effects["patterns"].as_array().unwrap().iter().any(|p| p["name"] == "Bokeh"));
 }
 
 #[test]

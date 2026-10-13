@@ -17,7 +17,52 @@ const UNGROUPED: &str = "Patterns";
 pub fn builtin_groups() -> Vec<Group<String>> {
     let lib = crate::pattern_cmds::builtin();
     let ids = |names: &[&str]| -> Vec<String> { names.iter().filter_map(|n| lib.iter().find(|p| p.name == *n).map(|p| p.id.clone())).collect() };
-    vec![Group::new("Geometric", ids(&["Checkerboard", "Diagonal Lines", "Dots", "Grid"])), Group::new("Textures", ids(&["Bricks", "Weave", "Paper Noise"]))]
+    vec![
+        Group::new(
+            "Geometric",
+            ids(&[
+                "Checkerboard",
+                "Diagonal Lines",
+                "Dots",
+                "Grid",
+                "Stripes",
+                "Chevron",
+                "Herringbone",
+                "Wavy Lines",
+                "Rings",
+                "Crosshatch",
+                "Truchet Arcs",
+                "Truchet Lines",
+                "Truchet Triangles",
+                "Interference",
+                "Quasicrystal",
+                "Hexagons",
+                "Islamic Star",
+            ]),
+        ),
+        Group::new(
+            "Textures",
+            ids(&[
+                "Bricks",
+                "Weave",
+                "Basket Weave",
+                "Paper Noise",
+                "Canvas",
+                "Denim",
+                "Concrete",
+                "Stucco",
+                "Sand",
+                "Wood Grain",
+                "Marble",
+                "Marble Stone",
+                "Wood Planks",
+                "Concrete Rough",
+            ]),
+        ),
+        Group::new("Organic", ids(&["Leaves", "Scales", "Cells", "Seed Spiral"])),
+        Group::new("Halftone", ids(&["Halftone Dots", "Halftone Lines"])),
+        Group::new("Effects", ids(&["Bokeh", "Grunge"])),
+    ]
 }
 
 /// Bring the groups in line with the library (see the module docs).
@@ -174,6 +219,24 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(r)
 }
 
+/// Restore the built-in folders (`gradient.presets.reset`'s counterpart): without `append`, the
+/// saved folders are replaced and any non-built-in pattern falls back into the trailing group.
+fn reset(s: &mut Session, p: &Value) -> Result<Value> {
+    let append = p.get("append").and_then(Value::as_bool).unwrap_or(false);
+    let mut b = builtin_groups();
+    if append {
+        for g in &mut b {
+            g.name = super::gradients::unique_group(&s.presets.pattern_groups, &g.name);
+        }
+        s.presets.pattern_groups.extend(b);
+    } else {
+        s.presets.pattern_groups = b;
+    }
+    sync(s);
+    s.presets_changed();
+    Ok(json!({"groups": s.presets.pattern_groups.len()}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec {
@@ -224,6 +287,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: super::GROUP_EDIT_PARAMS,
             enabled: always,
             run: edit,
+            journal: true,
+        },
+        CommandSpec {
+            id: "pattern.presets.reset",
+            label: "Restore Default Patterns",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"append":bool=false}"##,
+            enabled: always,
+            run: reset,
             journal: true,
         },
     ]

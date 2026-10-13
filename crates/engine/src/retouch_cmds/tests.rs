@@ -1326,7 +1326,7 @@ fn stamp(s: &mut Session, extra: Value) -> Result<Value> {
 }
 
 fn checker_at(x: i32, y: i32) -> f32 {
-    if (x.div_euclid(8) + y.div_euclid(8)).rem_euclid(2) == 0 { 0.8 } else { 1.0 }
+    if (x.div_euclid(64) + y.div_euclid(64)).rem_euclid(2) == 0 { 0.84 } else { 1.0 }
 }
 
 #[test]
@@ -1388,13 +1388,13 @@ fn pattern_stamp_scaled_tiles_have_no_gaps() {
 #[test]
 fn pattern_stamp_aligned_keeps_document_phase_across_strokes() {
     let mut s = session(80, 40, 8, "rgb");
-    stamp(&mut s, json!({"points": [[10, 16]], "size": 8, "hardness": 100, "aligned": true, "phase": [0, 0]})).unwrap();
-    let a = rgba(&s, 10, 16);
-    stamp(&mut s, json!({"points": [[18, 16]], "size": 8, "hardness": 100, "aligned": true, "phase": [0, 0]})).unwrap();
-    let b = rgba(&s, 18, 16);
-    assert!((a[0] - checker_at(10, 16)).abs() <= tol(8), "{a:?}");
-    assert!((b[0] - checker_at(18, 16)).abs() <= tol(8), "{b:?}");
-    assert!((a[0] - b[0]).abs() > 0.05, "aligned wallpaper: (10,16) and (18,16) sit on different cells");
+    stamp(&mut s, json!({"points": [[32, 16]], "size": 8, "hardness": 100, "aligned": true, "phase": [0, 0]})).unwrap();
+    let a = rgba(&s, 32, 16);
+    stamp(&mut s, json!({"points": [[72, 16]], "size": 8, "hardness": 100, "aligned": true, "phase": [0, 0]})).unwrap();
+    let b = rgba(&s, 72, 16);
+    assert!((a[0] - checker_at(32, 16)).abs() <= tol(8), "{a:?}");
+    assert!((b[0] - checker_at(72, 16)).abs() <= tol(8), "{b:?}");
+    assert!((a[0] - b[0]).abs() > 0.05, "aligned wallpaper: (32,16) and (72,16) sit on different cells");
 }
 
 #[test]

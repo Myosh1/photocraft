@@ -291,11 +291,12 @@ mod tests {
         let (mut s, _) = bucket_layers(8);
         s.execute(
             "paint.bucket",
-            json!({"x": 2, "y": 2, "contents": "pattern", "pattern": "Diagonal Lines", "antiAlias": false, "tolerance": 0, "sampleAllLayers": true}),
+            json!({"x": 2, "y": 2, "contents": "pattern", "pattern": "Grunge", "antiAlias": false, "tolerance": 0, "sampleAllLayers": true}),
         )
         .unwrap();
         let left: Vec<f32> = (0..10).map(|x| px(&s, x, 0)[0]).collect();
-        assert!(left.iter().any(|&r| r < 0.3) && left.iter().any(|&r| r > 0.9), "pattern varies inside the region: {left:?}");
+        let (lo, hi) = left.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &r| (lo.min(r), hi.max(r)));
+        assert!(hi - lo > 0.05, "pattern varies inside the region: {left:?}");
         assert_eq!(px(&s, 10, 5), vec![0.0; 4], "wall untouched");
         assert_eq!(px(&s, 15, 5), vec![0.0; 4], "region past the wall untouched");
     }
@@ -389,16 +390,12 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        s.execute("paint.bucket", json!({"x": 2, "y": 2, "contents": "pattern", "pattern": "Diagonal Lines", "antiAlias": false, "tolerance": 0})).unwrap();
-        // The filled region (left of the wall) now carries the pattern's light/dark variation,
-        // while the wall and the region past it are untouched.
-        let left: Vec<[f32; 4]> = (0..10)
-            .map(|x| {
-                let p = px(&s, x, 0);
-                [p[0], p[1], p[2], p[3]]
-            })
-            .collect();
-        assert!(left.iter().any(|p| p[0] < 0.3) && left.iter().any(|p| p[0] > 0.9), "pattern varies in the fill: {left:?}");
+        s.execute("paint.bucket", json!({"x": 2, "y": 2, "contents": "pattern", "pattern": "Grunge", "antiAlias": false, "tolerance": 0})).unwrap();
+        // The filled region (left of the wall) now carries the pattern's variation, while the wall
+        // and the region past it are untouched.
+        let left: Vec<f32> = (0..10).map(|x| px(&s, x, 0)[0]).collect();
+        let (lo, hi) = left.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &r| (lo.min(r), hi.max(r)));
+        assert!(hi - lo > 0.05, "pattern varies in the fill: {left:?}");
         assert_eq!(px(&s, 15, 5), vec![1.0, 1.0, 1.0, 1.0], "region past the wall untouched");
     }
 

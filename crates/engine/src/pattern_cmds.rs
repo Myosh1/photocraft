@@ -38,6 +38,65 @@ fn hash01(x: u32, y: u32, seed: u32) -> f32 {
     (h & 0xffff) as f32 / 65535.0
 }
 
+/// Shortest signed distance between two tile coordinates of side `p`: the tile wraps at its edges,
+/// so a pattern built from it is seamless.
+fn wrapd(d: f32, p: f32) -> f32 {
+    (d + p * 0.5).rem_euclid(p) - p * 0.5
+}
+
+/// Smoothed value noise that wraps at the tile side `p` (`cell` must divide `p`, `cell >= 1`).
+fn vnoise(x: u32, y: u32, p: u32, cell: u32, seed: u32) -> f32 {
+    let n = p / cell;
+    let (cx, cy) = (x / cell, y / cell);
+    let (fx, fy) = ((x % cell) as f32 / cell as f32, (y % cell) as f32 / cell as f32);
+    let v = |i: u32, j: u32| hash01(i % n, j % n, seed);
+    let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
+    let (sx, sy) = (smooth(fx), smooth(fy));
+    let a = v(cx, cy) + (v(cx + 1, cy) - v(cx, cy)) * sx;
+    let b = v(cx, cy + 1) + (v(cx + 1, cy + 1) - v(cx, cy + 1)) * sx;
+    a + (b - a) * sy
+}
+
+/// Three octaves of [`vnoise`], for weathered surfaces (concrete, wood, stucco).
+fn fbm(x: u32, y: u32, p: u32, seed: u32) -> f32 {
+    0.55 * vnoise(x, y, p, 4, seed) + 0.3 * vnoise(x, y, p, 2, seed + 11) + 0.15 * vnoise(x, y, p, 1, seed + 23)
+}
+
+/// Photographic tiles from CC0 material scans (see `assets/patterns/` and the repository's
+/// `ATTRIBUTION.md`). Decoded once and shared: a session clones the patterns, and a pattern's
+/// tiles are `Arc`, so the clone stays cheap.
+///
+/// The web build leaves the four PNGs out: they are about 1.5 MB of the wasm and the browser
+/// bundle has a hard per-file cap. The procedural tiles are identical on both.
+#[cfg(not(target_arch = "wasm32"))]
+fn photographic() -> &'static [Pattern] {
+    static PHOTO: std::sync::OnceLock<Vec<Pattern>> = std::sync::OnceLock::new();
+    PHOTO.get_or_init(|| {
+        const FILES: [(&str, &[u8]); 4] = [
+            ("Leaves", include_bytes!("../assets/patterns/leaves.png")),
+            ("Marble Stone", include_bytes!("../assets/patterns/marble.png")),
+            ("Wood Planks", include_bytes!("../assets/patterns/wood.png")),
+            ("Concrete Rough", include_bytes!("../assets/patterns/concrete.png")),
+        ];
+        FILES
+            .iter()
+            .filter_map(|(name, bytes)| {
+                let img = photocraft_codecs::decode(bytes).ok()?.convert(photocraft_codecs::ChannelLayout::Rgb, photocraft_codecs::SampleType::U8);
+                let (w, h) = (img.width(), img.height());
+                let mut surface = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::U8, false));
+                surface.write_interleaved(Rect::new(0, 0, w as i32, h as i32), img.data());
+                Some(Pattern::new(*name, surface, w, h))
+            })
+            .collect()
+    })
+}
+
+/// The web build has no room for the photographic tiles (see above).
+#[cfg(target_arch = "wasm32")]
+fn photographic() -> &'static [Pattern] {
+    &[]
+}
+
 fn procedural(name: &str, w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 3]) -> Pattern {
     let fmt = PixelFormat::new(ColorMode::Rgb, SampleType::U8, false);
     let mut s = Surface::new(fmt);
@@ -52,46 +111,292 @@ fn procedural(name: &str, w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 3]) -> P
     Pattern::new(name, s, w, h)
 }
 
-/// Built-in patterns: generated procedurally here (our own, CC0), so the library is never empty.
-pub fn builtin() -> Vec<Pattern> {
+/// Anti-aliased coverage from a signed distance in pixels: solid at `d >= 0.5`, empty at
+/// `d <= -0.5`, so diagonals and curves stay smooth when the tile is used at 100 %.
+fn ink(d: f32) -> f32 {
+    (d + 0.5).clamp(0.0, 1.0)
+}
+
+/// A centred band of half-width `half` repeated every `period` along `t`: 1 inside, 0 outside,
+/// with a one-pixel anti-aliased edge.
+fn band(t: f32, period: f32, half: f32) -> f32 {
+    let m = t.rem_euclid(period);
+    ink(half - (m - period * 0.5).abs())
+}
+
+/// Builds the built-in patterns: our own formulas (clean-room), generated procedurally. The tiles
+/// are large (384 px for the geometric ones) with anti-aliased edges, so the motifs read cleanly at
+/// 100 % like Photoshop's presets; they are seamless and deterministic.
+fn build_builtin() -> Vec<Pattern> {
     let g = |v: f32| [v, v, v];
-    vec![
-        procedural("Checkerboard", 16, 16, |x, y| g(if (x / 8 + y / 8) % 2 == 0 { 0.8 } else { 1.0 })),
-        procedural("Diagonal Lines", 8, 8, |x, y| g(if (x + y) % 8 < 2 { 0.2 } else { 1.0 })),
-        procedural("Dots", 12, 12, |x, y| {
-            let (dx, dy) = (x as f32 + 0.5 - 6.0, y as f32 + 0.5 - 6.0);
-            g(((dx * dx + dy * dy).sqrt() - 3.0).clamp(0.0, 1.0))
+    let mut patterns = vec![
+        // Geometric. 384 px tiles, large motifs, one-pixel anti-aliased edges.
+        procedural("Checkerboard", 384, 384, |x, y| g(if (x / 64 + y / 64) % 2 == 0 { 0.84 } else { 1.0 })),
+        procedural("Stripes", 384, 384, |_, y| g(0.96 - 0.76 * band(y as f32 + 32.0, 64.0, 20.0))),
+        procedural("Diagonal Lines", 384, 384, |x, y| g(0.96 - 0.76 * band((x + y) as f32, 64.0, 8.0))),
+        procedural("Grid", 384, 384, |x, y| {
+            let fx = (x as f32).rem_euclid(64.0);
+            let fy = (y as f32).rem_euclid(64.0);
+            let line = ink(4.0 - fx.min(64.0 - fx)).max(ink(4.0 - fy.min(64.0 - fy)));
+            g(0.96 - 0.72 * line)
         }),
-        procedural("Grid", 16, 16, |x, y| g(if x == 0 || y == 0 { 0.55 } else { 1.0 })),
-        procedural("Bricks", 32, 16, |x, y| {
-            let row = y / 8;
-            let xo = (x + if row % 2 == 1 { 8 } else { 0 }) % 16;
-            let mortar = y % 8 == 7 || xo == 15;
+        procedural("Dots", 384, 384, |x, y| {
+            let d = 24.0 - wrapd(x as f32 - 32.0, 64.0).hypot(wrapd(y as f32 - 32.0, 64.0));
+            g(0.96 - 0.84 * ink(d))
+        }),
+        procedural("Chevron", 384, 384, |x, y| {
+            let u = (x % 128) as f32 / 128.0;
+            let tri = 1.0 - (2.0 * u - 1.0).abs();
+            g(0.96 - 0.74 * band(y as f32 + 56.0 * tri + 8.0, 64.0, 16.0))
+        }),
+        procedural("Herringbone", 384, 384, |x, y| {
+            let v = if ((x + y) / 32) % 2 == ((y + 384 - x) / 32) % 2 { 0.84 } else { 0.3 };
+            [v, v * 0.97, v * 0.92]
+        }),
+        procedural("Wavy Lines", 384, 384, |x, y| {
+            let t = y as f32 + 22.0 * (std::f32::consts::TAU * x as f32 / 128.0).sin();
+            g(0.92 - 0.72 * band(t, 64.0, 20.0))
+        }),
+        procedural("Rings", 384, 384, |x, y| {
+            let d = wrapd(x as f32 - 32.0, 64.0).hypot(wrapd(y as f32 - 32.0, 64.0));
+            g(0.86 - 0.6 * ink(4.0 - (d - 24.0).abs()))
+        }),
+        procedural("Crosshatch", 384, 384, |x, y| {
+            let a = band((x + y) as f32, 48.0, 4.0);
+            let b = band(x as f32 - y as f32, 48.0, 4.0);
+            g(0.96 - 0.72 * a.max(b))
+        }),
+        procedural("Truchet Arcs", 384, 384, |x, y| {
+            let cell = 64u32;
+            let n = 384 / cell;
+            let (u, v) = ((x % cell) as f32 + 0.5, (y % cell) as f32 + 0.5);
+            let r = cell as f32 * 0.5;
+            let (a0, a1) = if hash01((x / cell) % n, (y / cell) % n, 1) < 0.5 {
+                ([0.0, 0.0], [cell as f32, cell as f32])
+            } else {
+                ([cell as f32, 0.0], [0.0, cell as f32])
+            };
+            let d = ((u - a0[0]).hypot(v - a0[1]) - r).abs().min(((u - a1[0]).hypot(v - a1[1]) - r).abs());
+            g(ink(3.5 - d))
+        }),
+        procedural("Truchet Lines", 384, 384, |x, y| {
+            let cell = 64u32;
+            let n = 384 / cell;
+            let (u, v) = ((x % cell) as f32, (y % cell) as f32);
+            let t = u / (cell as f32 - 1.0);
+            let side = if hash01((x / cell) % n, (y / cell) % n, 5) < 0.5 { v - t * (cell as f32 - 1.0) } else { v - (1.0 - t) * (cell as f32 - 1.0) };
+            g(ink(3.5 - side.abs()))
+        }),
+        procedural("Truchet Triangles", 384, 384, |x, y| {
+            let cell = 64u32;
+            let n = 384 / cell;
+            let (u, v) = ((x % cell) as f32 + 0.5, (y % cell) as f32 + 0.5);
+            let c = cell as f32;
+            let d = if hash01((x / cell) % n, (y / cell) % n, 13) < 0.5 { u - v } else { u + v - c };
+            g(0.9 - 0.66 * ((d + 1.0) * 0.5).clamp(0.0, 1.0))
+        }),
+        procedural("Interference", 384, 384, |x, y| {
+            let tau = std::f32::consts::TAU;
+            let s = |m: u32, o: u32| (tau * (m as f32 * x as f32 + o as f32 * y as f32) / 384.0).sin();
+            let (a, b, c) = (s(12, 0), s(12, 2), s(2, 12));
+            g((0.5 + 0.5 * (a * b + b * c + c * a) / 1.5).clamp(0.0, 1.0))
+        }),
+        procedural("Quasicrystal", 384, 384, |x, y| {
+            const WAVES: [(i32, i32); 12] = [(1, 0), (0, 1), (1, 1), (1, -1), (2, 1), (1, 2), (2, -1), (-1, 2), (3, 1), (1, 3), (3, 2), (2, 3)];
+            let mut s = 0.0f32;
+            for &(m, n) in &WAVES {
+                let phase = hash01(m.unsigned_abs() + 9, n.unsigned_abs() + 5, 9) * std::f32::consts::TAU;
+                s += (std::f32::consts::TAU * 12.0 * (m as f32 * x as f32 + n as f32 * y as f32) / 384.0 + phase).cos();
+            }
+            g((0.5 + 0.5 * (2.2 * s / WAVES.len() as f32).tanh()).clamp(0.0, 1.0))
+        }),
+        procedural("Hexagons", 384, 384, |x, y| {
+            let (w, h) = (64.0f32, 64.0f32);
+            let mut d = f32::MIN;
+            for gy in -1..=1i32 {
+                for gx in -1..=1i32 {
+                    let col = (x as f32 / 96.0).floor() as i32 + gx;
+                    let row = (y as f32 / 128.0).floor() as i32 + gy;
+                    let cx = col as f32 * 96.0;
+                    let cy = row as f32 * 128.0 + if col.rem_euclid(2) == 0 { 0.0 } else { 64.0 };
+                    let (dx, dy) = (wrapd(x as f32 - cx, 384.0), wrapd(y as f32 - cy, 384.0));
+                    let (px, py) = (dx.abs(), dy.abs());
+                    d = d.max((h - py).min((2.0 * w - 2.0 * px - py) / 5.0f32.sqrt()));
+                }
+            }
+            g(0.86 - 0.6 * ink(2.0 - d.abs()))
+        }),
+        procedural("Islamic Star", 384, 384, |x, y| {
+            let (l, s) = (128.0f32, 45.0f32);
+            let k = std::f32::consts::FRAC_1_SQRT_2;
+            let mut d = f32::MAX;
+            for gy in -1..=1i32 {
+                for gx in -1..=1i32 {
+                    let cx = ((x as f32 / l).floor() as i32 + gx) as f32 * l + l * 0.5;
+                    let cy = ((y as f32 / l).floor() as i32 + gy) as f32 * l + l * 0.5;
+                    let (dx, dy) = (wrapd(x as f32 - cx, 384.0), wrapd(y as f32 - cy, 384.0));
+                    let sq = dx.abs().max(dy.abs()) - s;
+                    let sq45 = ((dx + dy) * k).abs().max(((dx - dy) * k).abs()) - s;
+                    d = d.min(sq.min(sq45));
+                }
+            }
+            let a = ink(-d);
+            let gold = [0.85, 0.66, 0.22];
+            let navy = [0.10, 0.13, 0.24];
+            std::array::from_fn(|i| navy[i] + (gold[i] - navy[i]) * a)
+        }),
+        // Textures. 256 px tiles: fine grain, but big enough to read.
+        procedural("Bricks", 256, 128, |x, y| {
+            let row = y / 32;
+            let xo = (x + if row % 2 == 1 { 64 } else { 0 }) % 128;
+            let mortar = y % 32 < 3 || xo >= 125;
             let n = hash01(x, y, 7) * 0.08;
             if mortar { [0.78 + n, 0.76 + n, 0.72 + n] } else { [0.62 + n, 0.27 + n * 0.5, 0.2] }
         }),
-        procedural("Weave", 16, 16, |x, y| {
-            let over = ((x / 4) + (y / 4)) % 2 == 0;
-            let t = if over { (y % 4) as f32 / 3.0 } else { (x % 4) as f32 / 3.0 };
+        procedural("Weave", 64, 64, |x, y| {
+            let over = ((x / 16) + (y / 16)) % 2 == 0;
+            let t = if over { (y % 16) as f32 / 15.0 } else { (x % 16) as f32 / 15.0 };
             let v = 0.55 + 0.35 * (1.0 - (2.0 * t - 1.0).abs());
             [v, v * 0.92, v * 0.8]
         }),
-        procedural("Paper Noise", 64, 64, |x, y| {
-            // Two octaves of smoothed value noise (wraps at 64 px).
-            let oct = |cell: u32, seed: u32| {
-                let (cx, cy) = (x / cell, y / cell);
-                let (fx, fy) = ((x % cell) as f32 / cell as f32, (y % cell) as f32 / cell as f32);
-                let n = 64 / cell;
-                let v = |i: u32, j: u32| hash01(i % n, j % n, seed);
-                let s = |t: f32| t * t * (3.0 - 2.0 * t);
-                let (sx, sy) = (s(fx), s(fy));
-                let a = v(cx, cy) + (v(cx + 1, cy) - v(cx, cy)) * sx;
-                let b = v(cx, cy + 1) + (v(cx + 1, cy + 1) - v(cx, cy + 1)) * sx;
-                a + (b - a) * sy
-            };
-            g(0.78 + 0.14 * oct(8, 1) + 0.08 * oct(2, 2))
+        procedural("Basket Weave", 64, 64, |x, y| {
+            let block = 32u32;
+            let horizontal = ((x / block) + (y / block)).is_multiple_of(2);
+            let (u, v) = (x % block, y % block);
+            let (strand, phase) = if horizontal { (v / 16, u) } else { (u / 16, v) };
+            let mut v0 = if strand == 0 { 0.72 } else { 0.5 };
+            if phase == 15 || phase == 31 {
+                v0 *= 0.55;
+            }
+            [v0 * 1.08, v0 * 0.92, v0 * 0.66]
         }),
-    ]
+        procedural("Paper Noise", 256, 256, |x, y| g(0.78 + 0.14 * vnoise(x, y, 256, 32, 1) + 0.08 * vnoise(x, y, 256, 8, 2))),
+        procedural("Canvas", 32, 32, |x, y| {
+            let over = ((x / 2) + (y / 2)) % 2 == 0;
+            let v = if (if over { y % 2 } else { x % 2 }) == 0 { 0.85 } else { 0.55 } + hash01(x, y, 9) * 0.05;
+            [v, v, v * 0.98]
+        }),
+        procedural("Denim", 64, 64, |x, y| {
+            let v = 0.3 + 0.2 * (((x + 64 - y) % 32) as f32 / 31.0);
+            let n = hash01(x, y, 13) * 0.12;
+            [v * 0.85 + n, v * 0.95 + n, v * 1.25 + n]
+        }),
+        procedural("Concrete", 256, 256, |x, y| {
+            let speckle = if hash01(x, y, 31) > 0.96 { 0.1 } else { 0.0 };
+            g(0.6 + 0.22 * (fbm(x, y, 256, 5) - 0.5) + speckle)
+        }),
+        procedural("Stucco", 128, 128, |x, y| g(0.55 + 0.4 * (1.0 - (2.0 * fbm(x, y, 128, 7) - 1.0).abs()))),
+        procedural("Sand", 256, 256, |x, y| {
+            let v = 0.72 + 0.18 * (0.5 * hash01(x, y, 17) + 0.5 * hash01(x / 3, y / 3, 19) - 0.5);
+            [v * 1.05, v * 0.98, v * 0.82]
+        }),
+        procedural("Wood Grain", 256, 256, |x, y| {
+            let warp = fbm(x, y, 256, 3) - 0.5;
+            let rings = 0.5 + 0.5 * (std::f32::consts::TAU * 16.0 * x as f32 / 256.0 + 6.0 * warp).sin();
+            let grain = fbm(x, y, 256, 41);
+            let (dark, light) = ([0.34, 0.19, 0.08], [0.72, 0.5, 0.28]);
+            std::array::from_fn(|i| (dark[i] + (light[i] - dark[i]) * rings) * (0.85 + 0.25 * grain))
+        }),
+        procedural("Marble", 256, 256, |x, y| {
+            let phase = std::f32::consts::TAU * 8.0 * (x as f32 + y as f32) / 256.0 + 5.0 * fbm(x, y, 256, 23);
+            let vein = (1.0 - ((phase.sin().abs() - 0.08) / 0.14).clamp(0.0, 1.0)).max(0.0);
+            g((0.85 + 0.09 * fbm(x, y, 256, 47)) * (1.0 - 0.72 * vein))
+        }),
+        // Organic.
+        procedural("Seed Spiral", 256, 256, |x, y| {
+            let size = 256.0;
+            let centre = size * 0.5;
+            let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+            let n = 200u32;
+            let mut v = 0.0f32;
+            for i in 1..=n {
+                let f = i as f32 / n as f32;
+                let r = size * 0.46 * f.sqrt();
+                let a = i as f32 * golden;
+                let d = (x as f32 - (centre + r * a.cos())).hypot(y as f32 - (centre + r * a.sin()));
+                v = v.max((1.0 - ((d - 2.0) / 3.0).clamp(0.0, 1.0)) * (0.45 + 0.55 * f));
+            }
+            g(v.min(1.0))
+        }),
+        procedural("Scales", 256, 256, |x, y| {
+            let (cw, ch, r) = (64.0f32, 64.0f32, 36.0f32);
+            let (mut best, mut bdy) = (f32::MAX, 0.0f32);
+            for gy in -1..=1i32 {
+                for gx in -1..=1i32 {
+                    let row = (y as f32 / ch).floor() as i32 + gy;
+                    let shift = if row.rem_euclid(2) == 0 { 0.0 } else { cw * 0.5 };
+                    let cx = ((x as f32 / cw).floor() as i32 + gx) as f32 * cw + cw * 0.5 + shift;
+                    let cy = row as f32 * ch + ch * 0.5;
+                    let (dx, dy) = (wrapd(x as f32 - cx, 256.0), wrapd(y as f32 - cy, 256.0));
+                    let d = dx.hypot(dy);
+                    if d < best {
+                        best = d;
+                        bdy = dy;
+                    }
+                }
+            }
+            let inside = (1.0 - ((best - r) / 2.0).clamp(0.0, 1.0)).max(0.0);
+            let shade = 1.0 - 0.45 * ((bdy + r * 0.5) / (r * 1.5)).clamp(0.0, 1.0);
+            let v = (0.12 + 0.72 * inside * shade).min(1.0);
+            [v * 0.88, v * 0.94, v * 1.04]
+        }),
+        procedural("Cells", 256, 256, |x, y| {
+            let cell = 64u32;
+            let n = 256 / cell;
+            let (mut f1, mut f2, mut id) = (f32::MAX, f32::MAX, 0u32);
+            for gy in -1..=1i32 {
+                for gx in -1..=1i32 {
+                    let cx = (x / cell) as i32 + gx;
+                    let cy = (y / cell) as i32 + gy;
+                    let (px, py) = (cx.rem_euclid(n as i32) as u32, cy.rem_euclid(n as i32) as u32);
+                    let fx = cx as f32 * cell as f32 + (0.2 + 0.6 * hash01(px, py, 61)) * cell as f32;
+                    let fy = cy as f32 * cell as f32 + (0.2 + 0.6 * hash01(px, py, 67)) * cell as f32;
+                    let d = wrapd(x as f32 - fx, 256.0).hypot(wrapd(y as f32 - fy, 256.0));
+                    if d < f1 {
+                        f2 = f1;
+                        f1 = d;
+                        id = py * n + px;
+                    } else if d < f2 {
+                        f2 = d;
+                    }
+                }
+            }
+            let wall = (1.0 - ((f2 - f1) / 3.0).clamp(0.0, 1.0)).powf(1.5);
+            let shade = 0.55 + 0.35 * hash01(id, 7, 71);
+            g((shade * (1.0 - 0.6 * wall)).min(1.0))
+        }),
+        // Halftone.
+        procedural("Halftone Dots", 256, 256, |x, y| {
+            let (u, v) = ((x % 32) as f32 - 15.5, (y % 32) as f32 - 15.5);
+            g(0.96 - 0.84 * ((3.0 + 10.0 * (x as f32 / 256.0) - u.hypot(v)) / 1.5).clamp(0.0, 1.0))
+        }),
+        procedural("Halftone Lines", 256, 256, |x, y| {
+            let d = ((y % 32) as f32 - 15.5).abs();
+            g(0.96 - 0.84 * ((3.0 + 12.0 * (x as f32 / 256.0) - d) / 1.5).clamp(0.0, 1.0))
+        }),
+        // Effects.
+        procedural("Bokeh", 256, 256, |x, y| {
+            let size = 256.0;
+            let mut v = 0.04f32;
+            for k in 0..26u32 {
+                let (cx, cy) = (hash01(k, 1, 21) * size, hash01(k, 2, 21) * size);
+                let r = 8.0 + 24.0 * hash01(k, 3, 21);
+                let d = wrapd(x as f32 - cx, size).hypot(wrapd(y as f32 - cy, size));
+                v = v.max((0.35 + 0.5 * hash01(k, 4, 26)) * (1.0 - ((d - (r - 3.0)) / 3.0).clamp(0.0, 1.0)));
+            }
+            g(v.min(1.0))
+        }),
+        procedural("Grunge", 256, 256, |x, y| g(((1.0 - ((fbm(x, y, 256, 31) - 0.45) / 0.2).clamp(0.0, 1.0)) * (0.7 + 0.5 * hash01(x, y, 34))).min(1.0))),
+    ];
+    patterns.extend(photographic().iter().cloned());
+    patterns
+}
+
+/// The built-in pattern library, generated once and shared: a session clones the patterns, and a
+/// pattern's tiles are `Arc`, so the clone stays cheap even for the 384 px tiles.
+pub fn builtin() -> Vec<Pattern> {
+    static CACHE: std::sync::OnceLock<Vec<Pattern>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(build_builtin).clone()
 }
 
 fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
@@ -478,6 +783,101 @@ mod tests {
     }
 
     #[test]
+    fn builtin_patterns_are_unique_deterministic_and_covered_by_groups() {
+        let first = builtin();
+        let second = builtin();
+        assert!(first.len() >= 20, "the library keeps growing: {}", first.len());
+        assert_eq!(
+            first.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+            second.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+            "ids are stable (a built-in never changes)"
+        );
+        let names: std::collections::BTreeSet<&str> = first.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names.len(), first.len(), "pattern names are unique");
+        let ids: std::collections::BTreeSet<String> = first.iter().map(|p| p.id.clone()).collect();
+        let mut grouped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for group in crate::presets::patterns::builtin_groups() {
+            for id in group.items {
+                assert!(grouped.insert(id.clone()), "`{id}` is in two groups");
+            }
+        }
+        assert_eq!(grouped, ids, "every built-in pattern is in exactly one group");
+    }
+
+    #[test]
+    fn photo_and_stripes_builtins_have_the_expected_pixels() {
+        let s = Session::new();
+        // Leaves: the embedded CC0 photo tile decodes to 512×512 with a real tonal range.
+        let leaves = resolve(&s, "Leaves").unwrap();
+        assert_eq!((leaves.width, leaves.height), (512, 512));
+        let (mut lo, mut hi) = (1.0f32, 0.0f32);
+        for y in (0..512).step_by(8) {
+            for x in (0..512).step_by(8) {
+                let px = leaves.surface.pixel(x, y);
+                let l = (px[0] + px[1] + px[2]) / 3.0;
+                lo = lo.min(l);
+                hi = hi.max(l);
+            }
+        }
+        assert!(lo < 0.2 && hi > 0.45, "photo tonal range {lo}..{hi}");
+        // Stripes: 32 px dark bands on a light field.
+        let stripes = resolve(&s, "Stripes").unwrap();
+        assert!((stripes.surface.pixel(0, 0)[0] - 0.2).abs() < 0.03, "{:?}", stripes.surface.pixel(0, 0));
+        assert!((stripes.surface.pixel(0, 40)[0] - 0.96).abs() < 0.03, "{:?}", stripes.surface.pixel(0, 40));
+    }
+
+    #[test]
+    fn new_builtins_have_the_expected_pixels() {
+        let s = Session::new();
+        // Hexagons: a large flat-top honeycomb — light cells with dark shared edges.
+        let hex = resolve(&s, "Hexagons").unwrap();
+        assert_eq!((hex.width, hex.height), (384, 384));
+        let (mut light, mut dark) = (0, 0);
+        for y in (0..384).step_by(4) {
+            for x in (0..384).step_by(4) {
+                let v = hex.surface.pixel(x, y)[0];
+                if v > 0.7 {
+                    light += 1;
+                } else if v < 0.4 {
+                    dark += 1;
+                }
+            }
+        }
+        assert!(light > 1000 && dark > 100, "honeycomb cells {light} light / {dark} dark");
+        // Islamic Star: gold stars on a navy field.
+        let star = resolve(&s, "Islamic Star").unwrap();
+        assert_eq!((star.width, star.height), (384, 384));
+        let (mut gold, mut navy) = (0, 0);
+        for y in (0..384).step_by(4) {
+            for x in (0..384).step_by(4) {
+                let p = star.surface.pixel(x, y);
+                if p[0] > 0.8 && p[1] > 0.6 && p[2] < 0.3 {
+                    gold += 1;
+                } else if p[0] < 0.15 && p[2] > 0.2 {
+                    navy += 1;
+                }
+            }
+        }
+        assert!(gold > 200 && navy > 200, "star {gold} gold / {navy} navy");
+        // Marble: light stone threaded with thin dark veins.
+        let marble = resolve(&s, "Marble").unwrap();
+        assert_eq!((marble.width, marble.height), (256, 256));
+        let (mut dark, mut light) = (0, 0);
+        for y in 0..256 {
+            for x in 0..256 {
+                let px = marble.surface.pixel(x, y)[0];
+                if px < 0.35 {
+                    dark += 1;
+                } else if px > 0.7 {
+                    light += 1;
+                }
+            }
+        }
+        assert!(dark > 100, "some dark veins: {dark} dark pixels");
+        assert!(light > 20000, "mostly light stone: {light} light pixels");
+    }
+
+    #[test]
     fn define_rename_delete_and_pat_round_trip() {
         let mut s = session(8);
         s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
@@ -526,9 +926,9 @@ mod tests {
             let st = s.active().unwrap();
             assert_eq!(st.doc.patterns.len(), 1, "copied into the document");
             assert!(matches!(&st.doc.layer(id).unwrap().content, LayerContent::Fill(Fill::Pattern { .. })));
-            // Checkerboard: 8 px squares of 0.8 and 1.0 grey from the canvas origin.
-            let (a, b) = (pixel(&s, 1, 1), pixel(&s, 9, 1));
-            assert!((a[0] - 0.8).abs() < 0.01 && (b[0] - 1.0).abs() < 0.01, "{depth}: {a:?} {b:?}");
+            // Checkerboard: 64 px squares of 0.84 and 1.0 grey from the canvas origin.
+            let a = pixel(&s, 1, 1);
+            assert!((a[0] - 0.84).abs() < 0.01, "{depth}: {a:?}");
             s.undo();
             assert!(s.active().unwrap().doc.patterns.is_empty());
             assert!(s.execute("layer.newFillLayer.pattern", json!({"pattern": "nope"})).is_err());
@@ -540,11 +940,11 @@ mod tests {
         for depth in [8u64, 16, 32] {
             let mut s = session(depth);
             s.execute("select.rect", json!({"x": 0, "y": 0, "width": 8, "height": 8})).unwrap();
-            s.execute("edit.fill", json!({"contents": "pattern", "pattern": "Diagonal Lines"})).unwrap();
+            s.execute("edit.fill", json!({"contents": "pattern", "pattern": "Checkerboard"})).unwrap();
             let st = s.active().unwrap();
             let surf = st.doc.layers[0].surface().unwrap();
-            assert!(surf.pixel(0, 0)[0] < 0.3, "{depth}: line pixel");
-            assert!(surf.pixel(4, 0)[0] > 0.9);
+            let inside = surf.pixel(1, 1)[0];
+            assert!(inside < 0.9, "{depth}: pattern fills the selection {inside}");
             assert!(surf.pixel(20, 20)[0] > 0.99, "outside the selection untouched");
         }
     }
@@ -571,7 +971,7 @@ mod tests {
         let st = s.active().unwrap();
         assert_eq!(st.doc.patterns.len(), 1);
         let p = pixel(&s, 1, 1);
-        assert!((p[0] - 0.8).abs() < 0.01 && (p[2] - 0.8).abs() < 0.01, "{p:?}");
+        assert!((p[0] - 0.84).abs() < 0.01 && (p[2] - 0.84).abs() < 0.01, "{p:?}");
         assert!(s.execute("layer.layerStyle.patternOverlay", json!({"pattern": "missing"})).is_err());
         s.execute("layer.layerStyle.stroke", json!({"size": 4, "color": "#ffffff", "add": true})).unwrap();
         let st = s.active().unwrap();
