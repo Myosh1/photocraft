@@ -17,7 +17,20 @@ const UNGROUPED: &str = "Patterns";
 pub fn builtin_groups() -> Vec<Group<String>> {
     let lib = crate::pattern_cmds::builtin();
     let ids = |names: &[&str]| -> Vec<String> { names.iter().filter_map(|n| lib.iter().find(|p| p.name == *n).map(|p| p.id.clone())).collect() };
-    vec![Group::new("Geometric", ids(&["Checkerboard", "Diagonal Lines", "Dots", "Grid"])), Group::new("Textures", ids(&["Bricks", "Weave", "Paper Noise"]))]
+    vec![
+        Group::new("Geometric", ids(&["Checkerboard", "Diagonal Lines", "Dots", "Grid"])),
+        Group::new("Textures", ids(&["Bricks", "Weave", "Paper Noise"])),
+        Group::new("Brick & Tile", ids(&["Bricks 058", "Bricks 059", "Bricks 066", "Bricks 076 A", "Bricks 090"])),
+        Group::new("Concrete", ids(&["Concrete 023", "Concrete 025", "Concrete 046"])),
+        Group::new("Fabric", ids(&["Fabric 019", "Fabric 045", "Fabric 077", "Fabric 085"])),
+        Group::new("Foliage", ids(&["Ground 041", "Scattered Leaves 008", "Scattered Leaves 009"])),
+        Group::new("Ground", ids(&["Ground 062 S", "Ground 072", "Ground 076", "Ground 079 L", "Ground 079 S"])),
+        Group::new("Marble", ids(&["Marble 016", "Marble 019", "Marble 021", "Marble 025"])),
+        Group::new("Metal", ids(&["Diamond Plate 009", "Metal 053 C", "Metal 061 B"])),
+        Group::new("Paper", ids(&["Paper 001", "Paper 004", "Paper 006"])),
+        Group::new("Plants", ids(&["Grass 005", "Ground 003", "Ground 013", "Ground 037"])),
+        Group::new("Wood", ids(&["Bark 014", "Planks 037 A", "Wood 048", "Wood 049"])),
+    ]
 }
 
 /// Bring the groups in line with the library (see the module docs).
