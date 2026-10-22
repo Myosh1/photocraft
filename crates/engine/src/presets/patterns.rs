@@ -14,10 +14,11 @@ use crate::{Result, Session};
 const UNGROUPED: &str = "Patterns";
 
 /// Built-in folders for the built-in patterns (the procedural tiles and the CC0 photographs).
+/// Folders whose patterns are absent (the web build has no photographs) are dropped.
 pub fn builtin_groups() -> Vec<Group<String>> {
     let lib = crate::pattern_cmds::builtin();
     let ids = |names: &[&str]| -> Vec<String> { names.iter().filter_map(|n| lib.iter().find(|p| p.name == *n).map(|p| p.id.clone())).collect() };
-    vec![
+    let mut groups = vec![
         Group::new("Geometric", ids(&["Checkerboard", "Diagonal Lines", "Dots", "Grid"])),
         Group::new("Textures", ids(&["Bricks", "Weave", "Paper Noise"])),
         Group::new("Brick & Tile", ids(&["Bricks 058", "Bricks 059", "Bricks 066", "Bricks 076 A", "Bricks 090"])),
@@ -30,7 +31,9 @@ pub fn builtin_groups() -> Vec<Group<String>> {
         Group::new("Paper", ids(&["Paper 001", "Paper 004", "Paper 006"])),
         Group::new("Plants", ids(&["Grass 005", "Ground 003", "Ground 013", "Ground 037"])),
         Group::new("Wood", ids(&["Bark 014", "Planks 037 A", "Wood 048", "Wood 049"])),
-    ]
+    ];
+    groups.retain(|g| !g.items.is_empty());
+    groups
 }
 
 /// Bring the groups in line with the library (see the module docs).

@@ -571,8 +571,11 @@ mod tests {
         assert_eq!(builtin()[0].id, Session::new().patterns.items[0].id);
     }
 
+    /// Native-only: the web build leaves the photographic tiles out (see [`photographic`]).
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn photographic_tiles_decode_and_are_grouped() {
+        assert_eq!(photographic().len(), 38, "every photographic tile decodes");
         let s = Session::new();
         // A CC0 photo tile decodes at 512×512 with a real tonal range.
         let marble = resolve(&s, "Marble 016").unwrap();
