@@ -9,7 +9,7 @@
 
 use photocraft_color::{Color, ColorMode, PixelFormat, SampleType};
 use photocraft_doc::{Artboard, ArtboardBackground, Document, Layer, LayerContent, LayerId, Size};
-use photocraft_geom::Rect;
+use photocraft_geom::{Affine, Rect};
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
 
@@ -92,10 +92,12 @@ fn preset_size(name: &str) -> Option<(u32, u32)> {
 }
 
 fn background_param(p: &Value, cmd: &str) -> Result<Option<ArtboardBackground>> {
-    let custom = p.get("color").map(|_| {
-        let c = color_param(p, "color", [1.0; 4]);
-        ArtboardBackground::Custom(Color::rgba(c[0], c[1], c[2], c[3]))
-    });
+    let custom = if p.get("color").is_some() {
+        let c = color_param(cmd, p, "color", [1.0; 4])?;
+        Some(ArtboardBackground::Custom(Color::rgba(c[0], c[1], c[2], c[3])))
+    } else {
+        None
+    };
     Ok(match p.get("background").and_then(Value::as_str) {
         None => custom,
         Some("white") => Some(ArtboardBackground::White),
@@ -424,6 +426,7 @@ fn add_beside(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let grown = |len: u32, by: i32| (i64::from(len) + i64::from(by)).clamp(1, 300_000) as u32;
     let label = if duplicate { "Duplicate Artboard" } else { "New Artboard" };
+    let add_copy = crate::commands::layer_panel_option(s, "addCopyToCopiedLayersAndGroups", true);
     let (nid, rect) = s.edit(label, |doc, active| {
         if (sx, sy) != (0, 0) {
             crate::image_cmds::translate_doc(doc, cmd, sx, sy)?;
@@ -438,7 +441,7 @@ fn add_beside(s: &mut Session, p: &Value) -> Result<Value> {
         let nid = if duplicate {
             let src_rect = doc.layer(id).and_then(Layer::artboard).map(|a| a.rect).ok_or(EngineError::NoLayer(id))?;
             let (dx, dy) = (rect.x0.saturating_sub(src_rect.x0), rect.y0.saturating_sub(src_rect.y0));
-            let copy = crate::commands::layer_copy(doc, id)?;
+            let copy = crate::commands::layer_copy(doc, id, add_copy)?;
             let nid = doc.insert_above(Some(id), copy);
             // Grow the canvas first, so shapes on the board re-render uncut where they land.
             let fit = |len: u32, edge: i32| i64::from(len).max(i64::from(edge)).clamp(1, 300_000) as u32;
@@ -504,6 +507,9 @@ pub fn artboard_document(doc: &Document, id: LayerId) -> Result<Option<Document>
     one.layer_comps.clear();
     one.last_applied_comp = None;
     one.last_document_state = None;
+    // Paths, notes, slices and Count/Ruler marks move with the board. This also shifts
+    // `one.guides`, but they are rebuilt below from the source's, so nothing moves twice.
+    crate::canvas_geom::transform_doc_marks(&mut one, &Affine::translate(f64::from(dx), f64::from(dy)));
     let shift = |v: &[f64], o: i32, len: u32| v.iter().map(|g| g - f64::from(o)).filter(|g| *g > 0.0 && *g < f64::from(len)).collect::<Vec<_>>();
     one.guides.vertical = shift(&doc.guides.vertical, r.x0, r.width());
     one.guides.horizontal = shift(&doc.guides.horizontal, r.y0, r.height());

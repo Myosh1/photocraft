@@ -40,10 +40,12 @@ fn list_json(d: &Document) -> Value {
     json!({"notes": d.notes.iter().enumerate().map(|(i, n)| note_json(i, n)).collect::<Vec<_>>()})
 }
 
-fn color_of(p: &Value) -> Option<Color> {
-    p.get("color")?;
-    let c = crate::commands::color_param(p, "color", [1.0, 1.0, 0.51, 1.0]);
-    Some(Color::rgb(c[0], c[1], c[2]))
+fn color_of(cmd: &str, p: &Value) -> Result<Option<Color>> {
+    if p.get("color").is_none() {
+        return Ok(None);
+    }
+    let c = crate::commands::color_param(cmd, p, "color", [1.0, 1.0, 0.51, 1.0])?;
+    Ok(Some(Color::rgb(c[0], c[1], c[2])))
 }
 
 fn index_of(s: &Session, p: &Value, cmd: &str) -> Result<usize> {
@@ -68,7 +70,7 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         modified: pdf_date(),
         ..Default::default()
     };
-    if let Some(c) = color_of(p) {
+    if let Some(c) = color_of(CMD, p)? {
         n.color = c;
     }
     let i = s.edit("New Note", |d, _| {
@@ -90,7 +92,7 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(a) = p.get("author").and_then(Value::as_str) {
         n.author = a.to_string();
     }
-    if let Some(c) = color_of(p) {
+    if let Some(c) = color_of(CMD, p)? {
         n.color = c;
     }
     if let Some(o) = p.get("open").and_then(Value::as_bool) {
